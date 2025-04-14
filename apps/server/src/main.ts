@@ -10,8 +10,9 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const logger = new Logger('bootstrap');
 
+  const origin = `${configService.get<string>('URL_ADDRESS')}:${configService.get<number>('FRONTEND_PORT')}`;
   app.enableCors({
-    origin: configService.get<string>('FRONTEND_URL'),
+    origin: origin,
     credentials: true,
   });
   app.use(helmet());
