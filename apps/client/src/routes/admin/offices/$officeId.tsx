@@ -204,6 +204,7 @@ function RouteComponent() {
       setIsCreateSlotDialogOpen(false);
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["offices", officeId] });
+        queryClient.invalidateQueries({ queryKey: ["offices"] });
       }, 0);
       toast.success("Franja horaria agregada.");
     },
@@ -222,6 +223,7 @@ function RouteComponent() {
       setSlotToEdit(null);
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["offices", officeId] });
+        queryClient.invalidateQueries({ queryKey: ["offices"] });
       }, 0);
       toast.success("Franja horaria actualizada.");
     },
@@ -237,6 +239,7 @@ function RouteComponent() {
       setSlotToDelete(null);
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["offices", officeId] });
+        queryClient.invalidateQueries({ queryKey: ["offices"] });
       }, 0);
       toast.success("Franja horaria eliminada.");
     },
