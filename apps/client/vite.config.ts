@@ -30,8 +30,6 @@ export default defineConfig(({ mode }) => {
   const backendHost = env.URL_ADDRESS || 'localhost'; // Usa localhost como fallback
   const backendPort = env.BACKEND_PORT || '8000';    // Usa 8000 como fallback
   const backendTarget = `http://${backendHost}:${backendPort}`;
-  console.log(`INFO: Configurando proxy para redirigir /api a -> ${backendTarget}`); // Útil para saber a dónde apunta
-
 
   return {
     envDir: rootDir,
@@ -56,14 +54,7 @@ export default defineConfig(({ mode }) => {
           // Reescribe la ruta antes de enviarla al backend:
           // Ej: Petición del frontend a /api/users -> Petición al backend a /users
           // Quita el prefijo /api
-          rewrite: (path) => {
-            const newPath = path.replace(/^\/api/, '/api/v1');
-            console.log("rewrite");
-            console.log("backend", backendTarget)
-            console.log("path", path);
-            console.log("newPath", newPath);
-            return newPath;
-          }
+          rewrite: (path) => path.replace(/^\/api/, '/api/v1'),
 
           // Si tu backend usa WebSockets (ej: Socket.IO) en la misma ruta, añade esto:
           // ws: true,
