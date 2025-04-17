@@ -4,52 +4,88 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { CreateOfficeDto } from 'src/offices/dto/create-office.dto';
-import { UpdateOfficeDto } from 'src/offices/dto/update-office.dto';
-import { Office } from 'src/offices/entities/office.entity';
-import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
-import { OfficeQueryDto, SortOrder } from './dto/office-query.dto';
+import { Office, Prisma } from '@prisma/client';
 import {
   PaginatedResultDto,
   PaginationMeta,
-} from 'src/common/dto/pagination-result.dto';
+} from '../common/dto/pagination-result.dto';
+import { formatDateToHHMMSS } from '../common/utils/format-date-to-hhmmss';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateOfficeDto } from './dto/create-office.dto';
+import { OfficeQueryDto, SortOrder } from './dto/office-query.dto';
+import { OfficeResponseDto } from './dto/office-response.dto';
+import { UpdateOfficeDto } from './dto/update-office.dto';
+import { parseTimeStringToDate } from '../common/utils/parse-time-string-to-date';
+import { mapOfficeToResponseDto } from 'src/common/mappers/office.mapper';
 
 @Injectable()
 export class OfficesService {
   private readonly logger = new Logger(OfficesService.name);
 
-  constructor(
-    @InjectRepository(Office)
-    private readonly officeRepository: Repository<Office>,
-    private readonly dataSource: DataSource,
-  ) {}
+  /**
+   * Inyecta el PrismaService para interactuar con la base de datos.
+   * @param prisma Instancia de PrismaService (inyectada por NestJS).
+   */
+  constructor(private readonly prisma: PrismaService) {}
 
-  async create(createOfficeDto: CreateOfficeDto): Promise<Office> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
+  /**
+   * Crea un nuevo consultorio en la base de datos.
+   * Convierte las horas de string a Date antes de guardar.
+   * Maneja errores de constraint unique (ej: nombre duplicado).
+   * @param createOfficeDto Datos para crear el consultorio.
+   * @returns El consultorio creado, incluyendo relaciones básicas (timeSlots, jobPositions).
+   * @throws {ConflictException} Si ya existe un consultorio con el mismo nombre.
+   * @throws {Error} Si ocurre otro error durante la creación.
+   */
+  async create(createOfficeDto: CreateOfficeDto): Promise<OfficeResponseDto> {
+    this.logger.log(`Intentando crear consultorio: ${createOfficeDto.name}`);
+
+    const dataToCreate: Prisma.OfficeCreateInput = {
+      ...createOfficeDto,
+      workStartTime: parseTimeStringToDate(createOfficeDto.workStartTime),
+      workEndTime: parseTimeStringToDate(createOfficeDto.workEndTime),
+    };
 
     try {
-      const office = this.officeRepository.create(createOfficeDto);
-      const savedOffice = await queryRunner.manager.save(office);
+      const newOffice = await this.prisma.office.create({ data: dataToCreate });
+      this.logger.log(
+        `Consultorio "${newOffice.name}" creado con ID: ${newOffice.id}`,
+      );
 
-      await queryRunner.commitTransaction();
-      const foundOffice = await this.officeRepository.findOneOrFail({
-        where: { id: savedOffice.id },
-        relations: ['timeSlots'],
+      const officeWithRelations = await this.prisma.office.findUniqueOrThrow({
+        where: { id: newOffice.id },
+        include: { timeSlots: true, jobPositions: true },
       });
 
-      return foundOffice;
+      return mapOfficeToResponseDto(officeWithRelations);
     } catch (error) {
-      await queryRunner.rollbackTransaction();
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === 'P2002') {
+          const target = (error.meta?.target as string[])?.join(', ');
+          this.logger.warn(
+            `Conflicto P2002 al crear consultorio con nombre ${createOfficeDto.name}`,
+          );
+          throw new ConflictException(
+            `Ya existe un registro con el mismo valor para ${target || 'un campo único'} (ej: nombre).`,
+          );
+        }
+      }
+      this.logger.error(
+        `Error al crear consultorio "${createOfficeDto.name}":`,
+        error,
+      );
       throw error;
-    } finally {
-      await queryRunner.release();
     }
   }
 
-  async findAll(queryDto: OfficeQueryDto): Promise<PaginatedResultDto<Office>> {
+  /**
+   * Busca y devuelve consultorios paginados, filtrados y ordenados.
+   * @param queryDto DTO con parámetros de consulta (paginación, filtros, orden).
+   * @returns Un objeto con los datos paginados y metadatos de paginación.
+   */
+  async findAll(
+    queryDto: OfficeQueryDto,
+  ): Promise<PaginatedResultDto<OfficeResponseDto>> {
     this.logger.log(
       `Consultando consultorios con filtros: ${JSON.stringify(queryDto)}`,
     );
@@ -64,46 +100,28 @@ export class OfficesService {
       workStartTimeTo,
       filterWorkingDays,
     } = queryDto;
+    const skip = (page - 1) * limit;
+    const take = limit;
 
-    const queryBuilder: SelectQueryBuilder<Office> =
-      this.officeRepository.createQueryBuilder('office');
-
-    // --- Búsqueda Global ---
+    const where: Prisma.OfficeWhereInput = {};
     if (search) {
-      queryBuilder.where(
-        // Busca en nombre
-        '(office.name ILIKE :search)',
-        { search: `%${search}%` }, // ILIKE para case-insensitive, % para wildcard
-      );
+      where.name = { contains: search, mode: 'insensitive' };
     }
 
-    // --- Filtrado por Hora Inicio ---
+    const workStartTimeFilter: Prisma.DateTimeFilter = {};
     if (workStartTimeFrom) {
-      // Asegúrate que workStartTime no sea null antes de comparar
-      queryBuilder.andWhere(
-        'office.workStartTime IS NOT NULL AND office.workStartTime >= :workStartTimeFrom',
-        { workStartTimeFrom },
-      );
+      workStartTimeFilter.gte = parseTimeStringToDate(workStartTimeFrom);
     }
     if (workStartTimeTo) {
-      queryBuilder.andWhere(
-        'office.workStartTime IS NOT NULL AND office.workStartTime <= :workStartTimeTo',
-        { workStartTimeTo },
-      );
+      workStartTimeFilter.lte = parseTimeStringToDate(workStartTimeTo);
+    }
+    if (Object.keys(workStartTimeFilter).length > 0) {
+      where.workStartTime = workStartTimeFilter;
     }
 
-    // --- Filtrado por Días Laborales ---
     if (filterWorkingDays && filterWorkingDays.length > 0) {
-      queryBuilder.andWhere(
-        'office.workingDays && ARRAY[:...days]::offices_workingdays_enum[]',
-        { days: filterWorkingDays },
-      );
+      where.workingDays = { hasSome: filterWorkingDays };
     }
-
-    queryBuilder.loadRelationCountAndMap(
-      'office.timeSlotsCount',
-      'office.timeSlots',
-    );
 
     const validSortFields = [
       'name',
@@ -111,107 +129,216 @@ export class OfficesService {
       'workEndTime',
       'createdAt',
     ];
-    if (validSortFields.includes(sortBy)) {
-      // Necesitas prefijar con el alias de la tabla ('office.')
-      queryBuilder.orderBy(`office.${sortBy}`, sortOrder);
-    } else {
-      // Orden por defecto si sortBy no es válido (o lanzar error)
-      queryBuilder.orderBy('office.name', SortOrder.ASC);
-    }
-
-    // --- Paginación ---
-    queryBuilder.skip((page - 1) * limit).take(limit);
-
-    // --- Ejecutar Consulta ---
-    const [offices, totalItems] = await queryBuilder.getManyAndCount();
-
-    // --- Crear Metadatos de Paginación ---
-    const totalPages = Math.ceil(totalItems / limit);
-    const meta: PaginationMeta = {
-      totalItems,
-      itemCount: offices.length,
-      itemsPerPage: limit,
-      totalPages,
-      currentPage: page,
+    const orderByField = validSortFields.includes(sortBy) ? sortBy : 'name';
+    const orderBy: Prisma.OfficeOrderByWithRelationInput = {
+      [orderByField]: sortOrder.toLowerCase() as Prisma.SortOrder,
     };
 
-    this.logger.debug(
-      `Encontrados ${totalItems} consultorios, devolviendo página ${page} con ${offices.length} items.`,
-    );
-    return { data: offices, meta };
+    try {
+      const [officesFromDb, totalItems] = await this.prisma.$transaction([
+        this.prisma.office.findMany({
+          where,
+          orderBy,
+          skip,
+          take,
+          include: {
+            _count: {
+              select: {
+                timeSlots: true,
+                jobPositions: true,
+                employees: true,
+              },
+            },
+          },
+        }),
+        this.prisma.office.count({ where }),
+      ]);
+
+      const responseData = officesFromDb.map((office) =>
+        mapOfficeToResponseDto(office),
+      );
+
+      const totalPages = Math.ceil(totalItems / take);
+      const meta: PaginationMeta = {
+        totalItems,
+        itemCount: responseData.length,
+        itemsPerPage: take,
+        totalPages,
+        currentPage: page,
+      };
+
+      this.logger.debug(
+        `Encontrados ${totalItems} consultorios, devolviendo página ${page} con ${responseData.length} items.`,
+      );
+      return { data: responseData, meta };
+    } catch (error) {
+      this.logger.error(`Error al buscar consultorios:`, error);
+      throw error;
+    }
   }
 
-  async findOne(id: string): Promise<Office> {
-    const office = await this.officeRepository.findOne({
-      where: { id },
-      relations: ['timeSlots'], // Cargar timeSlots para la vista detallada
+  /**
+   * Busca un consultorio por su ID y devuelve sus detalles incluyendo relaciones.
+   * @param id El UUID del consultorio a buscar.
+   * @returns El consultorio encontrado con timeSlots y jobPositions.
+   * @throws {NotFoundException} Si no se encuentra el consultorio con el ID proporcionado.
+   */
+  async findOne(id: string): Promise<OfficeResponseDto> {
+    this.logger.log(`Buscando consultorio con ID: ${id}`);
+
+    const office = await this.prisma.office.findUnique({
+      where: { id: id },
+      include: {
+        timeSlots: { orderBy: { startTime: 'asc' } },
+        jobPositions: { orderBy: { name: 'asc' } },
+        employees: { orderBy: { firstName: 'asc' } },
+      },
     });
+
     if (!office) {
+      this.logger.warn(`Consultorio con ID "${id}" no encontrado.`);
       throw new NotFoundException(`Consultorio con ID "${id}" no encontrado.`);
     }
-    return office;
+
+    this.logger.debug(`Consultorio "${office.name}" encontrado.`);
+    return mapOfficeToResponseDto(office);
   }
 
-  async update(id: string, updateOfficeDto: UpdateOfficeDto): Promise<Office> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
+  /**
+   * Actualiza un consultorio existente.
+   * Verifica la existencia y conflictos de nombre único antes de actualizar.
+   * Convierte horas de string a Date si se proporcionan.
+   * @param id El UUID del consultorio a actualizar.
+   * @param updateOfficeDto Los datos a actualizar.
+   * @returns El consultorio actualizado, incluyendo relaciones básicas.
+   * @throws {NotFoundException} Si el consultorio a actualizar no existe.
+   * @throws {ConflictException} Si se intenta cambiar el nombre a uno que ya existe en otro consultorio.
+   * @throws {Error} Si ocurre otro error durante la actualización.
+   */
+  async update(
+    id: string,
+    updateOfficeDto: UpdateOfficeDto,
+  ): Promise<OfficeResponseDto> {
+    this.logger.log(`Intentando actualizar consultorio con ID: ${id}`);
 
-    let updatedOffice: Office;
+    await this.prisma.office.findUniqueOrThrow({ where: { id } });
+
+    if (updateOfficeDto.name) {
+      const existingByName = await this.prisma.office.findUnique({
+        where: { name: updateOfficeDto.name },
+      });
+      if (existingByName && existingByName.id !== id) {
+        this.logger.warn(
+          `Conflicto: Intento de actualizar a nombre duplicado "${updateOfficeDto.name}"`,
+        );
+        throw new ConflictException(
+          `Ya existe otro consultorio con el nombre "${updateOfficeDto.name}".`,
+        );
+      }
+    }
+
+    const dataToUpdate: Prisma.OfficeUpdateInput = { ...updateOfficeDto };
+    if (updateOfficeDto.workStartTime) {
+      dataToUpdate.workStartTime = parseTimeStringToDate(
+        updateOfficeDto.workStartTime,
+      );
+    }
+    if (updateOfficeDto.workEndTime) {
+      dataToUpdate.workEndTime = parseTimeStringToDate(
+        updateOfficeDto.workEndTime,
+      );
+    }
 
     try {
-      const office = await this.officeRepository.preload({
-        id,
-        ...updateOfficeDto,
+      const updatedOffice = await this.prisma.office.update({
+        where: { id: id },
+        data: dataToUpdate,
       });
 
-      if (!office) {
-        throw new Error(`Consultorio con ID ${id} no encontrado`);
-      }
+      this.logger.log(`Consultorio con ID "${id}" actualizado.`);
 
-      if (updateOfficeDto.name && updateOfficeDto.name !== office.name) {
-        const existing = await this.officeRepository.findOneBy({
-          name: updateOfficeDto.name,
-        });
-
-        if (existing && existing.id !== id) {
-          await queryRunner.rollbackTransaction(); // Cancela transacción
-          await queryRunner.release();
+      return mapOfficeToResponseDto(updatedOffice);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === 'P2002') {
+          const target = (error.meta?.target as string[])?.join(', ');
           throw new ConflictException(
-            `Ya existe otro consultorio con el nombre "${updateOfficeDto.name}".`,
+            `Conflicto al actualizar: Ya existe un registro con el mismo valor para ${target || 'un campo único'}.`,
+          );
+        }
+        if (error.code === 'P2025') {
+          this.logger.warn(
+            `Error P2025: Consultorio con ID "${id}" no encontrado durante la actualización.`,
+          );
+          throw new NotFoundException(
+            `Consultorio con ID "${id}" no encontrado para actualizar.`,
           );
         }
       }
-
-      updatedOffice = await queryRunner.manager.save(office);
-
-      await queryRunner.commitTransaction();
-
-      updatedOffice = await this.officeRepository.findOneOrFail({
-        where: { id },
-        relations: ['timeSlots'],
-      });
-
-      return updatedOffice;
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
+      this.logger.error(`Error al actualizar consultorio ${id}:`, error);
       throw error;
-    } finally {
-      await queryRunner.release();
     }
   }
 
+  /**
+   * Elimina un consultorio por su ID.
+   * Verifica la existencia antes de intentar eliminar.
+   * @param id El UUID del consultorio a eliminar.
+   * @returns Promise<void>
+   * @throws {NotFoundException} Si el consultorio a eliminar no existe.
+   * @throws {ConflictException} Si no se puede eliminar debido a restricciones de FK.
+   * @throws {Error} Si ocurre otro error durante la eliminación.
+   */
   async remove(id: string): Promise<void> {
-    const office = await this.officeRepository.findOne({ where: { id } });
+    this.logger.log(`Intentando eliminar consultorio con ID: ${id}`);
 
-    if (!office) {
-      throw new Error(`Consultorio con ID ${id} no encontrado`);
+    try {
+      await this.prisma.office.findUniqueOrThrow({ where: { id } });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        this.logger.warn(
+          `Consultorio con ID "${id}" no encontrado para eliminar (check previo).`,
+        );
+        throw new NotFoundException(
+          `Consultorio con ID "${id}" no encontrado para eliminar.`,
+        );
+      }
+      this.logger.error(
+        `Error buscando consultorio ${id} antes de eliminar:`,
+        error,
+      );
+      throw error;
     }
 
-    const result = await this.officeRepository.delete(id);
-
-    if (result.affected === 0) {
-      throw new Error(`No se pudo eliminar el consultorio con ID ${id}`);
+    try {
+      await this.prisma.office.delete({
+        where: { id: id },
+      });
+      this.logger.log(`Consultorio con ID "${id}" eliminado correctamente.`);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === 'P2025') {
+          this.logger.warn(
+            `Error P2025: Consultorio con ID "${id}" no encontrado durante la eliminación.`,
+          );
+          throw new NotFoundException(
+            `Consultorio con ID "${id}" no encontrado para eliminar.`,
+          );
+        }
+        if (error.code === 'P2003') {
+          this.logger.warn(
+            `Error P2003: No se puede eliminar el consultorio ${id} debido a restricciones de clave foránea.`,
+          );
+          throw new ConflictException(
+            `No se puede eliminar el consultorio porque tiene registros relacionados (ej: empleados activos).`,
+          );
+        }
+      }
+      this.logger.error(`Error al eliminar consultorio ${id}:`, error);
+      throw error;
     }
   }
 }

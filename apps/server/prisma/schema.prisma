@@ -1,0 +1,102 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+
+model Office {
+  id            String        @id @default(uuid())
+  name          String        @unique @db.VarChar(255)
+  workStartTime DateTime      @db.Time(6)
+  workEndTime   DateTime      @db.Time(6)
+  workingDays   DayOfWeek[]
+  timeSlots     TimeSlot[]    @relation("TimeSlotOffice")
+  jobPositions  JobPosition[] @relation("JobPositionOffice")
+  employees     User[]        @relation("UserOffice")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@map("offices")
+}
+
+model TimeSlot {
+  id        String   @id @default(uuid())
+  startTime DateTime @db.Time(6)
+  endTime   DateTime @db.Time(6)
+  officeId  String
+  office    Office   @relation("TimeSlotOffice", fields: [officeId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("time_slots")
+}
+
+model JobPosition {
+  id        String   @id @default(uuid())
+  name      String   @db.VarChar(255)
+  color     String   @db.VarChar(255)
+  employees User[]   @relation("JobPositionUser")
+  officeId  String
+  office    Office   @relation("JobPositionOffice", fields: [officeId], references: [id], onDelete: Cascade)
+  permissions Permission[]  @relation("PermissionJobPosition")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([name, officeId])
+  @@map("job_positions")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique @db.VarChar(255)
+  password  String   @db.VarChar(255)
+  firstName String   @db.VarChar(255)
+  lastName  String   @db.VarChar(255)
+  role      Role     @default(EMPLOYEE)
+  officeId  String?
+  office    Office?  @relation("UserOffice", fields: [officeId], references: [id], onDelete: SetNull)
+  jobPositionId String?
+  jobPosition   JobPosition? @relation("JobPositionUser", fields: [jobPositionId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([officeId])
+  @@index([jobPositionId])
+  @@map("users")
+}
+
+model Permission {
+  id        String   @id @default(uuid())
+  name      String   @unique @db.VarChar(255)
+  description String?
+  jobPositions JobPosition[] @relation("PermissionJobPosition")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("permissions")
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum Role {
+  ADMIN
+  EMPLOYEE
+}
