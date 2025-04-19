@@ -1,0 +1,69 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [
+    "tsconfig.json",
+    ".env",
+    ".env.*"
+  ],
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [
+        "dist/**"
+      ]
+    },
+    "lint": {
+      "inputs": [
+        "src/**/*.{ts,tsx,js,jsx}",
+        "test/**/*.{ts,tsx,js,jsx}",
+        "*.{js,mjs,cjs,json}",
+        "tsconfig.json",
+        "tsconfig.*.json",
+        ".eslintrc.*",
+        "eslint.config.*"
+      ],
+      "outputs": []
+    },
+    "format": {
+      "inputs": ["src/**/*.ts", "test/**/*.ts", "*.{js,mjs,cjs,json}"],
+      "outputs": []
+    },
+    "test": {
+      "inputs": [
+        "src/**/*.ts",
+        "test/**/*.ts",
+        "jest.config.js",
+        "jest-e2e.json",
+        "package.json",
+        "tsconfig.json"
+      ],
+      "outputs": ["coverage/**"]
+    },
+    "test:e2e": {
+      "dependsOn": ["build"],
+      "inputs": [
+        "src/**/*.ts",
+        "test/**/*.ts",
+        "jest.config.js",
+        "jest-e2e.json",
+        "package.json",
+        "tsconfig.json"
+      ],
+      "outputs": []
+    },
+    "preview": {
+      "dependsOn": ["build"],
+      "cache": false
+    },
+    "start": { "cache": false },
+    "start:debug": { "cache": false },
+    "start:prod": {
+      "dependsOn": ["build"],
+      "cache": false
+    }
+  }
+}
